@@ -1,0 +1,39 @@
+2025-02-18 22:30:11,632 - INFO - Starting live trading for BTCUSDT with leverage 10 and amount 100
+2025-02-18 22:30:11,949 - INFO - Error during live trading: "['EMA_9'] not in index"
+2025-02-18 22:32:49,738 - INFO - Starting live trading for BTCUSDT with leverage 10 and amount 100
+2025-02-18 22:32:50,073 - INFO - Error during live trading: "['EMA_9'] not in index"
+2025-02-18 22:34:11,744 - INFO - Starting live trading for BTCUSDT with leverage 10 and amount 100
+2025-02-18 22:34:12,083 - INFO - Error during live trading: "['EMA_9'] not in index"
+2025-02-18 22:39:30,086 - INFO - Starting live trading for BTCUSDT with leverage 10 and amount 100
+2025-02-18 22:39:30,410 - INFO - Current State Indicators: RSI=53.789551160625216, EMA_21=94781.04724170773, Price=94842.87
+2025-02-18 22:39:30,410 - INFO - Error during live trading: cannot reshape array of size 8 into shape (1,10)
+2025-02-18 22:42:22,964 - INFO - Starting live trading for BTCUSDT with leverage 10 and amount 100
+2025-02-18 22:42:23,306 - INFO - Current State Indicators: RSI=47.88286792712505, EMA_21=94773.33268571092, Price=94771.16
+2025-02-18 22:42:23,371 - INFO - Current Price: 94771.16, Action: 1
+2025-02-18 22:42:23,371 - INFO - Executing Short (Sell) Trade...
+2025-02-18 22:42:24,373 - INFO - Short trade with entry 94771.16, Stop Loss: 96666.58320000001, Take Profit: 90032.602
+2025-02-18 22:43:24,406 - INFO - Current State Indicators: RSI=47.88286792712505, EMA_21=94773.33268571092, Price=94771.16
+2025-02-18 22:44:24,433 - INFO - Current State Indicators: RSI=47.88286792712505, EMA_21=94773.33268571092, Price=94771.16
+2025-02-18 22:45:24,463 - INFO - Current State Indicators: RSI=47.88286792712505, EMA_21=94773.33268571092, Price=94771.16
+2025-02-18 22:45:59,403 - INFO - User inputs: symbol=SUIUSDT, leverage=5.0, amount_in_usdt=10.0
+2025-02-18 22:45:59,433 - INFO - Starting live trading for SUIUSDT with leverage 5.0 and amount 10.0
+2025-02-18 22:45:59,770 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:45:59,832 - INFO - Current Price: 2.9649, Action: 0
+2025-02-18 22:45:59,832 - INFO - Executing Long (Buy) Trade...
+2025-02-18 22:46:00,861 - INFO - Long trade with entry 2.9649, Stop Loss: 2.905602, Take Profit: 3.1131450000000003
+2025-02-18 22:47:00,885 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:48:00,920 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:49:00,944 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:50:00,979 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:51:01,020 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:52:01,059 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:53:01,078 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:54:01,099 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:55:01,130 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:56:01,165 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:57:01,193 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:58:01,220 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 22:59:01,270 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 23:00:01,297 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 23:01:01,335 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649
+2025-02-18 23:02:01,364 - INFO - Current State Indicators: RSI=43.225167321803596, EMA_21=2.9733563517539596, Price=2.9649

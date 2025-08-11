@@ -1,0 +1,1166 @@
+# config.py
+
+
+# Binance API Credentials (replace with environment variables in production)
+api_key = "1RHip0xIFG6ERjcixOFmRjohMnMKZzV1QkHxoFwK6sJYZdpoSY8psaWCoI3eITkK"
+api_secret = "0MCVQjZ3ptAhqu5J405FTWRI947gDqrrZDBE8R9tBmLlOAR17uAqvNbsPxunUDOi"
+
+# Base URL for Binance USDⓂ-Margined Futures API
+base_url = "https://fapi.binance.com"
+
+# Binance client setup
+from binance.client import Client
+client = Client(api_key, api_secret)
+
+# RL Agent Hyperparameters
+EPISODES = 1000  # Number of episodes for training the agent
+BATCH_SIZE = 32  # Batch size for experience replay
+
+# Other hyperparameters can be added here, such as learning rate, discount factor, etc.
+LEARNING_RATE = 0.001
+DISCOUNT_RATE = 0.95
+EXPLORATION_MAX = 1.0
+EXPLORATION_MIN = 0.01
+EXPLORATION_DECAY = 0.995
+
+
+#main.py
+import time
+import os
+import numpy as np
+import pandas as pd
+from indicators import preprocess_and_generate_signals  # Import from indicators correctly
+from model import PPOAgent
+from data_fetcher import fetch_live_data, fetch_historical_data  # Fetch live data function
+from trade_execution import execute_trade, close_position, set_stop_loss, set_take_profit, check_open_position_and_exit, set_leverage  # Trade execution functions
+from config import EPISODES, BATCH_SIZE  # Hyperparameters and configurations
+import logging
+from live_trading import start_live_trading
+
+
+
+# Set up logging configuration
+logging.basicConfig(filename='trading_bot.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+def log_message(message):
+    """Logs a message to both console and log file."""
+    print(f"Log: {message}")
+    logging.info(message)
+
+def get_ppo_state(df):
+    """Convert the preprocessed live data into a state for the PPO agent."""
+    state = df[['Close', 'Volume', 'RSI', 'EMA_21', 'EMA_50', 'EMA_200', 'BB_Upper', 'BB_Lower']].values[-1]
+
+    return state
+
+
+def manage_open_position(symbol, position_opened, position_side, entry_price, stop_loss, take_profit):
+    """Check if stop loss or take profit conditions are met and close the position accordingly."""
+    try:
+        # Fetch the latest market data to compare with stop loss/take profit
+        live_data = fetch_live_data(symbol)
+        current_price = live_data['Close'].values[-1]
+
+        log_message(f"Checking position: {position_side} at price {current_price}")
+
+        if position_side == "BUY":
+            if current_price <= stop_loss:
+                log_message(f"Stop loss hit for Long position. Closing position at {current_price}")
+                close_position(symbol, position_side)
+                position_opened = False
+            elif current_price >= take_profit:
+                log_message(f"Take profit hit for Long position. Closing position at {current_price}")
+                close_position(symbol, position_side)
+                position_opened = False
+        elif position_side == "SELL":
+            if current_price >= stop_loss:
+                log_message(f"Stop loss hit for Short position. Closing position at {current_price}")
+                close_position(symbol, position_side)
+                position_opened = False
+            elif current_price <= take_profit:
+                log_message(f"Take profit hit for Short position. Closing position at {current_price}")
+                close_position(symbol, position_side)
+                position_opened = False
+
+        return position_opened  # Return the position status to update the loop
+
+    except Exception as e:
+        log_message(f"Error during position management: {e}")
+        return position_opened  # Return the current status if an error occurs
+
+def live_trading_loop(symbol, leverage, amount_in_usdt, model):
+    """Main live trading loop with PPO model deciding actions."""
+    try:
+        log_message(f"Starting live trading for {symbol} with leverage {leverage} and amount {amount_in_usdt}")
+
+        # Set leverage before starting trading
+        set_leverage(symbol=symbol, leverage=leverage)
+
+        # Fetch initial live data
+        live_data = fetch_live_data(symbol)
+
+        # Initialize placeholders for take_profit, stop_loss, and position status
+        entry_price = None
+        take_profit = None
+        stop_loss = None
+        position_opened = False  # Track whether there's an active position
+        position_side = None  # Track whether the position is BUY or SELL
+
+        while True:
+            # Preprocess the live data for state generation
+            live_data = preprocess_and_generate_signals(live_data)
+            state = get_ppo_state(live_data)  # Most recent state for PPO model
+
+            # Fetch the current price of the asset
+            current_price = live_data['Close'].values[-1]
+
+            # Log current market indicators and price for debugging
+            log_message(f"Current State Indicators: RSI={live_data['RSI'].values[-1]}, EMA_21={live_data['EMA_21'].values[-1]}, Price={current_price}")
+
+
+            # If no position is currently opened, proceed with trading decisions
+            if not position_opened:
+                
+                # PPO model decides an action (buy, sell, hold)
+                action = model.choose_action(state)
+                log_message(f"Current Price: {current_price}, Action: {action}")
+
+
+                # Execute the action: 0 -> Buy (Long), 1 -> Sell (Short), 2 -> Hold
+                if action == 0:  # Buy/Long
+                    log_message("Executing Long (Buy) Trade...")
+                    execute_trade("BUY", amount_in_usdt, leverage, symbol)
+                    entry_price = current_price
+                    stop_loss = set_stop_loss(entry_price, "BUY",
+                     stop_loss_percent=0.02)
+                    take_profit = set_take_profit(entry_price, "BUY", take_profit_percent=0.05)
+                    log_message(f"Long trade with entry {entry_price}, Stop Loss: {stop_loss}, Take Profit: {take_profit}")
+                    position_opened = True  # Mark position as opened
+                    position_side = "BUY"  # Mark the position side as Buy
+
+                elif action == 1:  # Sell/Short
+                    log_message("Executing Short (Sell) Trade...")
+                    execute_trade("SELL", amount_in_usdt, leverage, symbol)
+                    entry_price = current_price
+                    stop_loss = set_stop_loss(entry_price, "SELL", stop_loss_percent=0.02)
+                    take_profit = set_take_profit(entry_price, "SELL", take_profit_percent=0.05)
+                    log_message(f"Short trade with entry {entry_price}, Stop Loss: {stop_loss}, Take Profit: {take_profit}")
+                    position_opened = True  # Mark position as opened
+                    position_side = "SELL"  # Mark the position side as Sell
+
+                else:
+                    log_message("Holding Position, no trade executed.")
+            
+            # Monitoring and position management will be handled in the next part.
+
+            time.sleep(60)  # Delay before the next fetch
+
+    except Exception as e:
+        log_message(f"Error during live trading: {e}")
+
+# main.py
+
+if __name__ == "__main__":
+    # Prompt user for input
+    symbol = input("Enter the trading pair (e.g., BTCUSDT): ").strip().upper()
+
+    leverage = float(input("Enter the leverage (e.g., 10 for 10x leverage): "))
+    amount_in_usdt = float(input("Enter the amount in USDT: "))
+
+    log_message(f"User inputs: symbol={symbol}, leverage={leverage}, amount_in_usdt={amount_in_usdt}")
+
+    # Initialize PPO agent (check if model exists, otherwise create a new one)
+    if os.path.exists(f"ppo_trading_model_{symbol}.h5"):
+        model = PPOAgent.load(f"ppo_trading_model_{symbol}.h5")
+        print("Model loaded successfully.")
+    else:
+        print(f"No saved model found for {symbol}. Initializing a new PPO agent and training with {symbol} data.")
+        state_size = 10  # Ensure this matches your state feature size
+        action_size = 3  # Example action size (buy, sell, hold)
+        model = PPOAgent(state_size, action_size)
+
+        # Train the PPO agent with the specified token's data
+        train_ppo_agent(symbol, model)
+
+    # Start live trading with the user-selected symbol
+    try:
+        live_trading_loop(symbol, leverage, amount_in_usdt, model)
+    except Exception as e:
+        print(f"An error occurred during live trading: {e}")
+
+
+#model.py
+import os
+import numpy as np
+import random
+from collections import deque
+import tensorflow as tf
+from tensorflow.keras import layers
+from keras.optimizers import Adam
+from indicators import get_indicators
+from data_fetcher import fetch_live_data, fetch_historical_data
+from indicators import preprocess_and_generate_signals
+
+
+# Hyperparameters
+EPISODES = 100
+LEARNING_RATE = 0.0003
+DISCOUNT_RATE = 0.95
+EXPLORATION_MAX = 1.0
+EXPLORATION_MIN = 0.01
+EXPLORATION_DECAY = 0.995
+BATCH_SIZE = 32
+CLIP_RATIO = 0.2
+VALUE_COEF = 0.5
+ENTROPY_COEF = 0.01
+RETRAIN_EVERY = 50  # Retrain model every 50 episodes
+
+# PPO Agent class using the indicator data
+class PPOAgent:
+    def __init__(self, state_size, action_size):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.memory = deque(maxlen=2000)
+        self.experience_buffer = []  # Store live trading experiences for retraining
+
+        # Build the PPO model
+        self.model = self._build_model()
+
+    def _build_model(self):
+        """Builds the PPO model with policy and value networks."""
+        state_input = layers.Input(shape=(self.state_size,))
+        
+        # Shared network layers
+        x = layers.Dense(128, activation='relu')(state_input)
+        x = layers.Dense(128, activation='relu')(x)
+        
+        # Policy output (action probabilities)
+        policy_output = layers.Dense(self.action_size, activation='softmax')(x)
+        
+        # Value output (state value estimation)
+        value_output = layers.Dense(1)(x)
+        
+        model = tf.keras.Model(inputs=state_input, outputs=[policy_output, value_output])
+        model.compile(optimizer=Adam(learning_rate=LEARNING_RATE))
+        return model
+
+    def choose_action(self, state):
+        """Select an action based on the state using the policy network."""
+        state = np.reshape(state, [1, self.state_size])  # Ensure the state has batch dimension
+        policy, _ = self.model.predict(state)
+        
+        # Check if the policy output contains NaN
+        if np.isnan(policy).any():
+            raise ValueError(f"NaN values detected in policy output: {policy}")
+
+        # Normalize the policy to ensure it sums to 1
+        policy = policy / np.sum(policy[0])
+
+        action = np.random.choice(self.action_size, p=policy[0])  # Choose action based on policy
+        return action
+
+
+    def save(self, model_path):
+        """Save the trained model."""
+        self.model.save(model_path)
+        print(f"Model saved at {model_path}")
+
+    #classmethod
+    def load(cls, model_path):
+        """Load the saved model."""
+        loaded_model = tf.keras.models.load_model(model_path)
+        instance = cls.__new__(cls)  # Create an uninitialized instance of PPOAgent
+        instance.model = loaded_model
+        return instance
+
+    # Other methods like choose_action, train, etc.
+
+
+    def choose_action(self, state):
+        """Select an action based on the state using the policy network."""
+        state = np.reshape(state, [1, self.state_size])  # Ensure the state has batch dimension
+        policy, _ = self.model.predict(state)
+        action = np.random.choice(self.action_size, p=policy[0])  # Choose action based on policy
+        return action
+
+    def store_experience(self, state, action, reward, next_state, done):
+        """Store live trading experiences."""
+        self.experience_buffer.append((state, action, reward, next_state, done))
+
+    def train(self, states, actions, rewards, next_states, dones):
+        """Train the model using PPO."""
+        
+        # Convert states and other inputs to NumPy arrays and ensure proper shape
+        states = np.array(states)
+        actions = np.array(actions)
+        rewards = np.array(rewards)
+        next_states = np.array(next_states)
+        dones = np.array(dones)
+
+        # Reshape states to remove extra dimensions if necessary
+        if len(states.shape) == 3 and states.shape[1] == 1:  # Remove the extra 1 dimension
+            states = np.squeeze(states, axis=1)
+
+        # Ensure that states are of shape (batch_size, state_size)
+        assert len(states.shape) == 2, f"Expected states shape (batch_size, state_size), but got {states.shape}"
+
+        # Predict the old policy and values using the current model
+        old_policy, old_values = self.model.predict(states)
+
+        # Compute advantages and target values
+        advantages, target_values = self._compute_advantages(rewards, next_states, dones, old_values)
+
+        # Training the model using PPO loss
+        with tf.GradientTape() as tape:
+            # Get the current policy and value
+            policy, value = self.model(states)
+
+            # Gather action probabilities
+            action_probs = tf.gather(policy, actions, batch_dims=1, axis=1)
+            old_action_probs = tf.gather(old_policy, actions, batch_dims=1, axis=1)
+
+            # Compute the PPO ratio
+            ratio = action_probs / (old_action_probs + 1e-10)
+            clipped_ratio = tf.clip_by_value(ratio, 1.0 - CLIP_RATIO, 1.0 + CLIP_RATIO)
+
+            # Compute the loss components
+            policy_loss = -tf.reduce_mean(tf.minimum(ratio * advantages, clipped_ratio * advantages))
+            value_loss = tf.reduce_mean((target_values - value) ** 2)
+            entropy_loss = -tf.reduce_mean(policy * tf.math.log(policy + 1e-10))
+
+            # Total loss
+            loss = policy_loss + VALUE_COEF * value_loss - ENTROPY_COEF * entropy_loss
+
+        # Compute gradients and apply them
+        grads = tape.gradient(loss, self.model.trainable_variables)
+        self.model.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+
+
+
+
+
+
+    def _compute_advantages(self, rewards, next_states, dones, values):
+        """Calculate the advantages using GAE (Generalized Advantage Estimation)."""
+        advantages = np.zeros_like(rewards)
+        target_values = np.zeros_like(rewards)
+        
+        next_value = 0
+        for t in range(len(rewards) - 1, -1, -1):
+            if dones[t]:
+                next_value = 0
+            delta = rewards[t] + DISCOUNT_RATE * next_value - values[t]
+            advantages[t] = delta + DISCOUNT_RATE * advantages[t + 1] if t < len(rewards) - 1 else delta
+            target_values[t] = advantages[t] + values[t]
+            next_value = values[t]
+
+        return advantages, target_values
+
+    def periodic_retrain(self):
+        """Periodically retrain the model using the stored experiences."""
+        if len(self.experience_buffer) >= BATCH_SIZE:
+            states, actions, rewards, next_states, dones = zip(*self.experience_buffer)
+            self.train(np.array(states), np.array(actions), np.array(rewards), np.array(next_states), np.array(dones))
+            print("Retrained the model using live experiences.")
+            self.experience_buffer.clear()
+
+
+# Reward function based on trade outcomes
+def calculate_reward(profit_or_loss, hit_stop_loss=False, transaction_cost=0.001):
+    reward = profit_or_loss - transaction_cost  # Deduct transaction cost
+    if hit_stop_loss:
+        return -abs(reward) * 2  # Larger penalty for hitting stop-loss
+    return reward
+
+
+
+def prepare_data():
+    symbol = 'BTCUSDT'  # Replace with your desired symbol
+    df = fetch_live_data(symbol)
+    # Further processing of df if necessary
+    return df
+
+
+# Main training loop with live trading and periodic retraining
+def train_ppo_agent():
+    """Training PPO agent with market data and live experiences for a specific token."""
+    
+    # Prompt the user to input the token name
+    symbol = input("Enter the trading pair for training (e.g., BTCUSDT): ").strip().upper()
+
+    state_size = 10  # Define based on indicators
+    action_size = 3  # Actions: buy, hold, sell
+
+    # Check if a pre-trained model for the token exists, otherwise create a new agent
+    model_path = f"ppo_trading_model_{symbol}.h5"
+    if os.path.exists(model_path):
+        print(f"Loading pre-trained model for {symbol}...")
+        agent = PPOAgent.load(model_path)
+    else:
+        print(f"No pre-trained model found for {symbol}. Creating a new PPO agent.")
+        agent = PPOAgent(state_size, action_size)
+
+    for episode in range(EPISODES):
+        states, actions, rewards, next_states, dones = [], [], [], [], []
+
+        # Fetch data for the user-specified symbol
+        data = fetch_historical_data(symbol)  # Use symbol to fetch relevant data
+        
+        if data is None or data.empty:
+            print(f"Skipping training: Data for {symbol} is empty or None.")
+            continue  # Skip this episode
+
+        # Step 1: Preprocess the data and calculate the signals
+        data = preprocess_and_generate_signals(data)
+        print(data.columns)  # Check if all necessary columns are present after processing
+
+        # Define the exact columns that match the expected state size
+        selected_features = ['Close', 'Volume', 'RSI', 'EMA_21', 'EMA_50', 
+                             'EMA_200', 'BB_Upper', 'BB_Lower', 'MACD', 'MACD_Signal']
+
+        # Step 2: Checking for missing columns
+        missing_columns = [col for col in selected_features if col not in data.columns]
+        if missing_columns:
+            print(f"Error: Missing columns in data: {missing_columns}")
+            continue  # Skip this episode if essential columns are missing
+
+        for step in range(len(data) - 1):
+            state = data[selected_features].iloc[step].values.reshape(1, -1)
+            next_state = data[selected_features].iloc[step + 1].values.reshape(1, -1)
+
+            # Check if state contains NaN values
+            if np.isnan(state).any():
+                print(f"Skipping step {step}: State contains NaN values.")
+                continue
+
+            if state.shape[1] != state_size:
+                print(f"Skipping step {step}: Incorrect state size. Expected {state_size}, but got {state.shape[1]}")
+                continue
+
+            action = agent.choose_action(state)
+            reward = calculate_reward(profit_or_loss=1.0)
+            done = False
+
+            agent.store_experience(state, action, reward, next_state, done)
+
+
+            states.append(state)
+            actions.append(action)
+            rewards.append(reward)
+            next_states.append(next_state)
+            dones.append(done)
+
+        if episode % RETRAIN_EVERY == 0:
+            agent.periodic_retrain()
+
+        # Save the model periodically
+        if episode % 50 == 0:
+            agent.model.save(f"ppo_model_episode_{episode}_{symbol}.keras")
+
+        print(f"Episode {episode}/{EPISODES} completed for {symbol}.")
+
+
+# Run the training process
+train_ppo_agent()  # No arguments are needed here since token will be asked within the function
+
+
+import numpy as np
+import pandas as pd
+import pandas_ta as ta
+import matplotlib.pyplot as plt
+from binance.client import Client
+
+# Import the config.py for API keys
+from config import api_key, api_secret, client
+
+# Function to calculate RSI with customizable length
+def calculate_rsi(df, length=14):
+    """Calculate RSI using pandas_ta for the specified length."""
+    df['RSI'] = ta.rsi(df['Close'], length=length)
+    return df
+
+# Function to calculate EMA for a specified period
+def calculate_ema(df, window):
+    """Calculate EMA for the DataFrame."""
+    df[f'EMA_{window}'] = df['Close'].ewm(span=window, adjust=False).mean()
+    return df
+
+# Function to calculate Bollinger Bands
+def calculate_bollinger_bands(df, window=20, num_std=2):
+    """Calculate Bollinger Bands for the given DataFrame."""
+    df['SMA'] = df['Close'].rolling(window=window).mean()  # Simple Moving Average
+    rolling_std = df['Close'].rolling(window=window).std()
+    df['BB_Upper'] = df['SMA'] + (rolling_std * num_std)  # Upper Band
+    df['BB_Lower'] = df['SMA'] - (rolling_std * num_std)  # Lower Band
+
+    # Fill any NaN values
+    df.ffill(inplace=True)
+    df.bfill(inplace=True)
+
+    return df
+
+# Function to calculate MACD
+def calculate_macd(df):
+    """Calculate MACD (Moving Average Convergence Divergence)."""
+    exp12 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp26 = df['Close'].ewm(span=26, adjust=False).mean()
+    macd = exp12 - exp26
+    signal = macd.ewm(span=9, adjust=False).mean()  # Signal line
+
+    df['MACD'] = macd
+    df['MACD_Signal'] = signal
+    return df
+
+# Function to get Order Book Depth data
+def get_order_book_depth(symbol='BTCUSDT', limit=100):
+    """Get order book depth from Binance API."""
+    order_book = client.get_order_book(symbol=symbol, limit=limit)
+    bids = order_book['bids']  # Buy orders
+    asks = order_book['asks']  # Sell orders
+
+    bid_depth = sum([float(bid[1]) for bid in bids])  # Total buy order volume
+    ask_depth = sum([float(ask[1]) for ask in asks])  # Total sell order volume
+
+    return bid_depth, ask_depth
+
+# Function to get Funding Rate
+def get_funding_rate(symbol='BTCUSDT'):
+    """Get funding rate from Binance Futures."""
+    funding_info = client.futures_funding_rate(symbol=symbol, limit=1)
+    funding_rate = float(funding_info[0]['fundingRate'])
+    return funding_rate
+
+# Function to preprocess and generate signals
+def preprocess_and_generate_signals(data):
+    # Convert necessary columns to numeric
+    data['Close'] = pd.to_numeric(data['Close'], errors='coerce')
+    data['Volume'] = pd.to_numeric(data['Volume'], errors='coerce')
+
+    # Calculate RSI
+    data['RSI'] = ta.rsi(data['Close'], length=14)
+
+    # Calculate EMAs
+    data['EMA_21'] = data['Close'].ewm(span=21, adjust=False).mean()
+    data['EMA_50'] = data['Close'].ewm(span=50, adjust=False).mean()
+    data['EMA_200'] = data['Close'].ewm(span=200, adjust=False).mean()
+
+    # Calculate Bollinger Bands
+    bb = ta.bbands(data['Close'], length=20, std=2)
+    data['BB_Upper'] = bb['BBU_20_2.0']
+    data['BB_Lower'] = bb['BBL_20_2.0']
+
+    # Calculate MACD
+    macd = ta.macd(data['Close'])
+    data['MACD'] = macd['MACD_12_26_9']
+    data['MACD_Signal'] = macd['MACDs_12_26_9']
+
+    # Forward and backward fill any NaN values
+    data.ffill(inplace=True)  # Forward fill NaN values
+    data.bfill(inplace=True)  # Backward fill NaN values (as a fallback)
+
+    return data
+
+
+# Function to generate combined trading signal
+def combined_trading_signal(symbol='BTCUSDT'):
+    bid_depth, ask_depth = get_order_book_depth(symbol=symbol)
+    funding_rate = get_funding_rate(symbol=symbol)
+
+    df = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "100 minutes ago UTC")
+    df = pd.DataFrame(df, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close_time', 
+                                   'Quote_asset_volume', 'Number_of_trades', 'Taker_buy_base_asset_volume', 
+                                   'Taker_buy_quote_asset_volume', 'Ignore'])
+    df = preprocess_and_generate_signals(df)
+
+    if df is not None:
+        rsi = df['RSI'].iloc[-1]  # Last RSI value
+
+        # Trading signal logic based on indicators and thresholds
+        if bid_depth > ask_depth and funding_rate > 0 and rsi < 30:
+            signal = "Bullish - Market sentiment is bullish (Order book, funding rate, and RSI)"
+        elif ask_depth > bid_depth and funding_rate < 0 and rsi > 70:
+            signal = "Bearish - Market sentiment is bearish (Order book, funding rate, and RSI)"
+        else:
+            signal = "Neutral - Mixed signals from order book, funding rate, and RSI"
+    else:
+        signal = "Data insufficient for analysis"
+
+    return signal
+
+# Optional: Plotting some of the calculated indicators
+def plot_indicators(df):
+    """Plot the indicators like RSI, EMA, Bollinger Bands, and MACD."""
+    plt.figure(figsize=(12, 10))
+
+    # Plot RSI
+    plt.subplot(4, 1, 1)
+    plt.plot(df['RSI'], label='RSI', color='orange')
+    plt.title('RSI (Relative Strength Index)')
+    plt.legend()
+
+    # Plot EMA
+    plt.subplot(4, 1, 2)
+    plt.plot(df['Close'], label='Close Price', color='blue')
+    plt.plot(df['EMA_21'], label='EMA 21', color='red')
+    plt.plot(df['EMA_50'], label='EMA 50', color='green')
+    plt.plot(df['EMA_200'], label='EMA 200', color='purple')
+    plt.title('Exponential Moving Averages (EMA)')
+    plt.legend()
+
+    # Plot Bollinger Bands
+    plt.subplot(4, 1, 3)
+    plt.plot(df['Close'], label='Close Price', color='blue')
+    plt.plot(df['BB_Upper'], label='Upper Bollinger Band', color='red')
+    plt.plot(df['BB_Lower'], label='Lower Bollinger Band', color='green')
+    plt.title('Bollinger Bands')
+    plt.legend()
+
+    # Plot MACD
+    plt.subplot(4, 1, 4)
+    plt.plot(df['MACD'], label='MACD', color='blue')
+    plt.plot(df['MACD_Signal'], label='MACD Signal', color='red')
+    plt.title('MACD (Moving Average Convergence Divergence)')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# Function to get the indicators from the DataFrame
+def get_indicators(df):
+    """Return calculated indicators from the DataFrame."""
+    df = calculate_indicators(df)
+    return df[['RSI', 'EMA_21', 'EMA_50', 'EMA_200', 'BB_Upper', 'BB_Lower', 'MACD', 'MACD_Signal']]
+
+# utils.py
+import datetime
+import logging
+
+# Set up logging configuration
+logging.basicConfig(
+    filename="trading_bot.log",
+    level=logging.DEBUG,  # You can adjust this level to INFO, WARNING, etc.
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+
+def log_message(message, level="INFO"):
+    """
+    Log messages with a specified log level.
+    Levels: INFO, WARNING, ERROR, DEBUG
+    Parameters:
+    - message (str): The message to log.
+    - level (str): The level of the log message. Defaults to INFO.
+    """
+    log_levels = {
+        "INFO": logging.info,
+        "WARNING": logging.warning,
+        "ERROR": logging.error,
+        "DEBUG": logging.debug
+    }
+
+    # Log the message using the appropriate log level
+    log_function = log_levels.get(level.upper(), logging.info)
+    log_function(message)
+
+def convert_timestamp(timestamp):
+    """
+    Convert a UNIX timestamp to a human-readable format (YYYY-MM-DD HH:MM:SS).
+    
+    Parameters:
+    - timestamp (int): The UNIX timestamp to convert.
+    
+    Returns:
+    - str: A human-readable date-time string or None if the timestamp is invalid.
+    """
+    try:
+        dt_object = datetime.datetime.fromtimestamp(int(timestamp))
+        return dt_object.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        log_message(f"Error converting timestamp: {e}", level="ERROR")
+        return None  # Return None instead of a string to indicate failure
+
+
+#trade_execuation.py
+from config import client
+import time
+
+# Function to set leverage for futures trading
+def set_leverage(symbol, leverage):
+    try:
+        response = client.futures_change_leverage(symbol=symbol, leverage=int(leverage))
+        print(f"Leverage set to {leverage}x for {symbol}")
+    except Exception as e:
+        print(f"Error setting leverage: {e}")
+
+# Validate action outside of execute_trade
+def validate_action(action):
+    if isinstance(action, str):
+        print(f"Invalid action value received: {action}. Converting to integer.")
+        action = 0 if action == "BUY" else 1 if action == "SELL" else None
+    if action not in [0, 1]:
+        raise ValueError("Invalid action passed")
+    return action
+
+# Function to execute a trade
+def execute_trade(action, amount_in_usdt, leverage, symbol):
+    try:
+        # Ensure action is valid
+        action = validate_action(action)
+
+        print(f"Action passed to execute_trade: {action}")
+
+        # Set leverage for the symbol
+        set_leverage(symbol, leverage)
+
+        # Fetch the current price of the asset
+        price_data = client.futures_symbol_ticker(symbol=symbol)
+        current_price = float(price_data['price'])
+        quantity = amount_in_usdt / current_price  # Calculate quantity based on USDT amount
+
+        # Fetch the asset precision from Binance Futures
+        exchange_info = client.futures_exchange_info()
+        for symbol_info in exchange_info['symbols']:
+            if symbol_info['symbol'] == symbol:
+                price_precision = symbol_info['pricePrecision']
+                precision = symbol_info['quantityPrecision']
+                break
+
+        # Round the quantity based on the asset's precision
+        quantity = round(quantity, precision)
+
+        # Determine the side based on the action
+        side = "BUY" if action == 0 else "SELL"
+
+        print(f"Preparing to execute: {side} {quantity} contracts for {symbol} at leverage {leverage}")
+
+        # Create market order
+        order = client.futures_create_order(
+            symbol=symbol,
+            side=side,
+            type='MARKET',
+            quantity=quantity
+        )
+
+        # Log the order details after execution
+        print(f"Trade executed: {side} {amount_in_usdt} USDT ({quantity} contracts) for {symbol} at leverage {leverage}. Order ID: {order['orderId']}")
+
+        # Now, calculate stop-loss and take-profit
+        entry_price = current_price
+        stop_loss = set_stop_loss(entry_price, side, stop_loss_percent=0.02)
+        take_profit = set_take_profit(entry_price, side, take_profit_percent=0.05)
+
+        # Ensure stop-loss and take-profit prices conform to the asset's price precision
+        stop_loss = round(stop_loss, price_precision)
+        take_profit = round(take_profit, price_precision)
+
+        # Place Stop-Loss Order
+        stop_loss_order = client.futures_create_order(
+            symbol=symbol,
+            side='BUY' if side == 'SELL' else 'SELL',  # Opposite side to close
+            type='STOP_MARKET',
+            stopPrice=stop_loss,
+            quantity=quantity,
+            reduceOnly=True  # Ensures the order only reduces the position
+        )
+        print(f"Stop-loss order placed at: {stop_loss}")
+
+        # Place Take-Profit Order
+        take_profit_order = client.futures_create_order(
+            symbol=symbol,
+            side='BUY' if side == 'SELL' else 'SELL',  # Opposite side to close
+            type='TAKE_PROFIT_MARKET',
+            stopPrice=take_profit,
+            quantity=quantity,
+            reduceOnly=True  # Ensures the order only reduces the position
+        )
+        print(f"Take-profit order placed at: {take_profit}")
+
+        return order
+
+    except Exception as e:
+        print(f"Error executing trade: {e}")
+        return None
+
+def set_stop_loss(entry_price, side, stop_loss_percent=0.02):
+    """
+    Set stop-loss based on the entry price and desired percentage.
+    :param entry_price: Entry price of the trade
+    :param side: 'BUY' or 'SELL'
+    :param stop_loss_percent: Percentage for stop-loss
+    :return: Stop-loss price
+    """
+    if side == "BUY":
+        stop_loss_price = entry_price * (1 - stop_loss_percent)
+    elif side == "SELL":
+        stop_loss_price = entry_price * (1 + stop_loss_percent)
+    print(f"Stop-loss set at {stop_loss_price} for {side} position.")
+    return stop_loss_price
+
+
+def set_take_profit(entry_price, side, take_profit_percent=0.05):
+    """
+    Set take-profit based on the entry price and desired percentage.
+    :param entry_price: Entry price of the trade
+    :param side: 'BUY' or 'SELL'
+    :param take_profit_percent: Percentage for take-profit
+    :return: Take-profit price
+    """
+    if side == "BUY":
+        take_profit_price = entry_price * (1 + take_profit_percent)
+    elif side == "SELL":
+        take_profit_price = entry_price * (1 - take_profit_percent)
+    print(f"Take-profit set at {take_profit_price} for {side} position.")
+    return take_profit_price
+
+
+def close_position(symbol, side, amount):
+    """
+    Closes an open position by executing the opposite trade.
+    :param symbol: The trading pair (e.g., 'BTCUSDT')
+    :param side: Current side of the position, 'BUY' or 'SELL'
+    :param amount: Amount to close
+    """
+    opposite_side = 'SELL' if side == 'BUY' else 'BUY'
+    try:
+        # Create a market order to close the position
+        close_order = client.futures_create_order(
+            symbol=symbol,
+            side=opposite_side,
+            type='MARKET',
+            quantity=amount,
+            reduceOnly=True  # Ensures this order only reduces the position
+        )
+        print(f"Position closed: {opposite_side} {amount} {symbol}. Order ID: {close_order['orderId']}")
+        return close_order
+    except Exception as e:
+        print(f"Error closing position: {e}")
+        return None
+
+def auto_trade(symbol, leverage, amount_in_usdt, starting_action=0):
+    """
+    Auto-trade loop that opens a new trade after closing the previous one.
+    It adjusts the next trade based on the outcome of the previous trade.
+    :param symbol: Trading pair (e.g., 'BTCUSDT')
+    :param leverage: Leverage for the trade
+    :param amount_in_usdt: Amount in USDT for each trade
+    :param starting_action: 0 for BUY, 1 for SELL
+    """
+    action = starting_action
+    previous_profit = 0
+
+    while True:
+        # Execute a trade
+        entry_price, quantity = execute_trade(action, amount_in_usdt, leverage, symbol)
+
+        if entry_price is None or quantity is None:
+            print("Error executing trade. Exiting auto-trade loop.")
+            break
+
+        # Set stop-loss and take-profit
+        stop_loss = set_stop_loss(entry_price, "BUY" if action == 0 else "SELL")
+        take_profit = set_take_profit(entry_price, "BUY" if action == 0 else "SELL")
+
+        # Monitor the trade until it closes
+        print("Monitoring trade...")
+        while True:
+            profit = check_open_position_and_exit(symbol, "BUY" if action == 0 else "SELL", take_profit, stop_loss, leverage)
+            if profit is not None:
+                previous_profit = profit
+                break
+            time.sleep(10)  # Check every 10 seconds
+
+        # Adjust action for the next trade based on the previous profit (simple learning)
+        if previous_profit > 0:
+            action = 0  # Open BUY next
+        else:
+            action = 1  # Open SELL next
+
+        print(f"Completed one trade. Preparing to open the next trade. Last profit: {previous_profit}")
+
+def get_open_positions(symbol):
+    """
+    Fetches the current open positions for a given symbol from Binance Futures.
+    :param symbol: The trading pair (e.g., 'BERAUSDT')
+    :return: The current open position details (if any)
+    """
+    try:
+        positions = client.futures_position_information(symbol=symbol)
+        for position in positions:
+            if float(position['positionAmt']) != 0:  # A position is open if the amount is non-zero
+                return position
+        return None
+    except Exception as e:
+        print(f"Error fetching open positions: {e}")
+        return None
+
+
+def check_open_position_and_exit(symbol, side, take_profit, stop_loss, leverage):
+    """
+    Check if an open position should be closed based on the current price relative to stop-loss and take-profit.
+    :param symbol: The trading pair (e.g., 'BERAUSDT')
+    :param side: The side of the open position ('BUY' or 'SELL')
+    :param take_profit: Take-profit price
+    :param stop_loss: Stop-loss price
+    :param leverage: Leverage used in the trade
+    :return: Profit made or lost, or None if the position remains open
+    """
+    # Retrieve open position for the symbol
+    position = get_open_positions(symbol)
+    
+    # If there is no position open, return None
+    if not position:
+        return None
+
+    # Fetch the current price and position details
+    current_price = float(position['markPrice'])
+    entry_price = float(position['entryPrice'])
+    position_amt = abs(float(position['positionAmt']))  # Quantity of the position
+    
+    # Handle 'BUY' (long) positions
+    if side == 'BUY':
+        # Stop-loss triggered
+        if current_price <= stop_loss:
+            profit = (current_price - entry_price) * leverage * position_amt
+            print(f"Closing BUY position at {current_price} (Stop-Loss triggered). Profit: {profit}")
+            close_position(symbol, side, position_amt)
+            return profit
+        
+        # Take-profit triggered
+        elif current_price >= take_profit:
+            profit = (current_price - entry_price) * leverage * position_amt
+            print(f"Closing BUY position at {current_price} (Take-Profit triggered). Profit: {profit}")
+            close_position(symbol, side, position_amt)
+            return profit
+    
+    # Handle 'SELL' (short) positions
+    elif side == 'SELL':
+        # Stop-loss triggered
+        if current_price >= stop_loss:
+            profit = (entry_price - current_price) * leverage * position_amt
+            print(f"Closing SELL position at {current_price} (Stop-Loss triggered). Profit: {profit}")
+            close_position(symbol, side, position_amt)
+            return profit
+        
+        # Take-profit triggered
+        elif current_price <= take_profit:
+            profit = (entry_price - current_price) * leverage * position_amt
+            print(f"Closing SELL position at {current_price} (Take-Profit triggered). Profit: {profit}")
+            close_position(symbol, side, position_amt)
+            return profit
+
+    # If the position is still open, return None to indicate that no exit happened
+    return None
+
+
+
+
+
+#data_fetcher.py
+import pandas as pd
+import numpy as np
+import pandas_ta as ta
+from config import client
+from indicators import preprocess_and_generate_signals, calculate_rsi, calculate_ema, calculate_bollinger_bands, calculate_macd, get_order_book_depth, get_funding_rate  # Importing additional functions
+
+def fetch_historical_data(symbol, interval='1m', limit=1000):
+    """
+    Fetch historical data from Binance and return a DataFrame.
+    :param symbol: The trading pair (e.g., 'BTCUSDT')
+    :param interval: The interval between data points (e.g., '1m', '5m', '1h')
+    :param limit: The number of data points to retrieve
+    :return: A DataFrame with Open, High, Low, Close, and Volume columns
+    """
+    try:
+        # Fetch the data from Binance API
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=limit)
+        df = pd.DataFrame(klines, columns=[
+            'Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close time',
+            'Quote asset volume', 'Number of trades', 'Taker buy base asset volume',
+            'Taker buy quote asset volume', 'Ignore'
+        ])
+        
+        # Convert numerical columns from string to float
+        df['Open'] = pd.to_numeric(df['Open'])
+        df['High'] = pd.to_numeric(df['High'])
+        df['Low'] = pd.to_numeric(df['Low'])
+        df['Close'] = pd.to_numeric(df['Close'])
+        df['Volume'] = pd.to_numeric(df['Volume'])
+        
+        # Ensure no missing columns or values
+        if df.empty:
+            raise ValueError("Empty DataFrame returned from Binance.")
+
+        # Handle any missing values (optional: forward fill missing data)
+        df[['Open', 'High', 'Low', 'Close', 'Volume']] = df[['Open', 'High', 'Low', 'Close', 'Volume']].ffill()
+
+
+        return df[['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']]
+    
+    except Exception as e:
+        print(f"Error fetching historical data: {e}")
+        return pd.DataFrame()
+
+
+def fetch_live_data(symbol, seq_length=10):
+    """
+    Fetch live data and calculate indicators for the RL agent.
+    :param symbol: The trading pair (e.g., 'BTCUSDT')
+    :param seq_length: The number of recent data points to retrieve
+    :return: The most recent live data with indicators, ready for RL agent processing
+    """
+    # Fetch recent historical data for the symbol (used as live data)
+    live_data = fetch_historical_data(symbol, limit=seq_length)
+
+    # Check if live data is available and non-empty
+    if live_data is None or live_data.empty:
+        print(f"Error: No live data available for {symbol}.")
+        return None
+
+    # Preprocess the live data by calculating indicators (RSI, EMA, Bollinger Bands, MACD)
+    live_data = preprocess_and_generate_signals(live_data)
+
+    # Return the live data processed with indicators
+    return live_data
+
+def generate_combined_signal(symbol='BTCUSDT'):
+    """
+    Generate a combined trading signal based on various indicators and the order book depth.
+    :param symbol: The trading pair (e.g., 'BTCUSDT')
+    :return: A trading signal indicating 'Bullish', 'Bearish', or 'Neutral'
+    """
+    try:
+        # Get real-time data for order book depth and funding rate
+        bid_depth, ask_depth = get_order_book_depth(symbol=symbol)
+        funding_rate = get_funding_rate(symbol=symbol)
+        
+        # Fetch historical price data for technical indicators
+        df = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "100 minutes ago UTC")
+        df = pd.DataFrame(df, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close_time', 'Quote_asset_volume', 'Number_of_trades', 'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'])
+        df = preprocess_and_generate_signals(df)
+
+        if df is None or df.empty:
+            print(f"Error: No valid data to process for {symbol}.")
+            return None
+
+        # Trading signal logic based on indicators and order book depth
+        if bid_depth > ask_depth and funding_rate > 0:
+            signal = "Bullish - Market sentiment is bullish (Order book and funding rate)"
+        elif ask_depth > bid_depth and funding_rate < 0:
+            signal = "Bearish - Market sentiment is bearish (Order book and funding rate)"
+        else:
+            signal = "Neutral - Mixed signals from order book and funding rate"
+        
+        return signal
+    except Exception as e:
+        print(f"Error generating combined signal for {symbol}: {e}")
+        return None
+
+
+import time
+from data_fetcher import fetch_live_data  # Fetch live data
+from trade_execution import execute_trade, close_position, set_take_profit, set_stop_loss
+from model import PPOAgent  # Use PPO agent for trading decisions
+from indicators import preprocess_and_generate_signals  # Import the signal generation function
+
+# Function for live trading
+def start_live_trading(symbol, agent, leverage=6, trade_amount=1, seq_length=60):
+    balance = 20  # Initial balance for trading
+    position = None
+    total_profit = 0
+    stop_loss = None
+    take_profit = None
+    entry_price = None
+
+    print(f"Live trading started for {symbol}...")
+
+    while True:
+        try:
+            # Fetch live data and get the most recent price
+            live_data = fetch_live_data(symbol, seq_length=seq_length)
+
+            if live_data is None:
+                print(f"No valid live data for {symbol}. Retrying in 1 minute...")
+                time.sleep(60)
+                continue
+
+            # Preprocess and generate signals
+            live_data = preprocess_and_generate_signals(live_data)
+            current_market_price = live_data['Close'].iloc[-1]
+
+            # PPO agent acts on the latest live data
+            action = agent.act(live_data)
+            print(f"Current Price: {current_market_price}, Action: {action}")
+
+            # If no position is open, decide to buy or sell
+            if position is None:
+                if action == 1:  # BUY
+                    position = "BUY"
+                    entry_price = current_market_price
+                    print(f"Executing BUY at {entry_price}")
+                    execute_trade("BUY", trade_amount, leverage, symbol)
+                    stop_loss = set_stop_loss(entry_price, side="BUY", stop_loss_percent=0.02)
+                    take_profit = set_take_profit(entry_price, side="BUY", take_profit_percent=0.05)
+
+                elif action == 2:  # SELL
+                    position = "SELL"
+                    entry_price = current_market_price
+                    print(f"Executing SELL at {entry_price}")
+                    execute_trade("SELL", trade_amount, leverage, symbol)
+                    stop_loss = set_stop_loss(entry_price, side="SELL", stop_loss_percent=0.02)
+                    take_profit = set_take_profit(entry_price, side="SELL", take_profit_percent=0.05)
+
+            # Check stop loss and take profit conditions
+            elif position == "BUY":
+                if current_market_price <= stop_loss:
+                    profit = (current_market_price - entry_price) * leverage
+                    total_profit += profit
+                    balance += profit
+                    print(f"Closed BUY at {current_market_price} (Stop Loss). Profit: {profit}")
+                    close_position(symbol, "BUY")
+                    position = None
+                elif current_market_price >= take_profit:
+                    profit = (current_market_price - entry_price) * leverage
+                    total_profit += profit
+                    balance += profit
+                    print(f"Closed BUY at {current_market_price} (Take Profit). Profit: {profit}")
+                    close_position(symbol, "BUY")
+                    position = None
+
+            elif position == "SELL":
+                if current_market_price >= stop_loss:
+                    profit = (entry_price - current_market_price) * leverage
+                    total_profit += profit
+                    balance += profit
+                    print(f"Closed SELL at {current_market_price} (Stop Loss). Profit: {profit}")
+                    close_position(symbol, "SELL")
+                    position = None
+                elif current_market_price <= take_profit:
+                    profit = (entry_price - current_market_price) * leverage
+                    total_profit += profit
+                    balance += profit
+                    print(f"Closed SELL at {current_market_price} (Take Profit). Profit: {profit}")
+                    close_position(symbol, "SELL")
+                    position = None
+
+            # Print the current balance and total profit
+            print(f"Balance: {balance}, Total Profit: {total_profit}")
+
+            # Wait for 1 minute before fetching the next live data
+            time.sleep(60)
+
+        except Exception as e:
+            print(f"Error in live trading loop: {e}")
+            time.sleep(60)  # Wait before retrying to avoid flooding requests
+
+# Example usage
+if __name__ == "__main__":
+    symbol = input("Enter trading pair (e.g., BTCUSDT): ").strip().upper()
+    leverage = float(input("Enter leverage (e.g., 10 for 10x leverage): "))
+    trade_amount = float(input("Enter trade amount in USDT: "))
+
+    # Initialize your PPO agent (load from saved model if available)
+    agent = PPOAgent.load("ppo_trading_model")  # Assuming the model is saved
+    
+    # Start live trading
+    start_live_trading(symbol, agent, leverage=leverage, trade_amount=trade_amount)
